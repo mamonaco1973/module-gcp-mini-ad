@@ -1,117 +1,184 @@
-# ==================================================================================================
-# Fetch the Canonical-published Ubuntu 24.04 AMI ID from AWS Systems Manager Parameter Store
-# This path is maintained by Canonical; it always points at the current stable AMI for 24.04 (amd64, HVM, gp3)
-# ==================================================================================================
-data "aws_ssm_parameter" "ubuntu_24_04" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
-}
+# ==========================================================================================
+# FIREWALL RULE: Active Directory Domain Controller Ports
+# ==========================================================================================
+# This firewall rule enables the network ports required by a Samba-based AD DC.
+# Notes:
+#   - Includes standard LDAP, Kerberos, DNS, SMB, and replication ports.
+#   - Ephemeral RPC ports (49152–65535) are also required for AD RPC operations.
+#   - Source range is currently set to 0.0.0.0/0 (world-open) for demo/testing only.
+#     In production, restrict source_ranges to trusted networks or peered VPCs.
+# ==========================================================================================
 
-# ==================================================================================================
-# Resolve the full AMI object using the ID returned by SSM
-# - Restrict owner to Canonical to avoid spoofed AMIs
-# - Filter by the exact image-id pulled above
-# - most_recent is kept true as a guard when multiple matches exist in a region
-# ==================================================================================================
-data "aws_ami" "ubuntu_ami" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
+resource "google_compute_firewall" "ad_ports" {
+  name    = "ad-ports"
+  network = var.network
 
-  filter {
-    name   = "image-id"
-    values = [data.aws_ssm_parameter.ubuntu_24_04.value]
+  # Core TCP ports for AD services
+  allow {
+    protocol = "tcp"
+    ports    = ["22", "53", "80","88", "135", "389", "445", "443", "464", "636", "3268", "3269"]
   }
-}
 
-# ==================================================================================================
-# EC2 instance: Ubuntu 24.04 for Samba-based mini-AD DC
-# - Private subnet only (no public IP)
-# - IAM instance profile enables SSM connectivity (Session Manager, etc.)
-# - User data renders from a template with domain settings and admin secrets
-# ==================================================================================================
-resource "aws_instance" "mini_ad_dc_instance" {
-  ami                    = data.aws_ami.ubuntu_ami.id
-  instance_type          = var.instance_type             # Small, adequate for lab AD DC; scale up for real loads
-  subnet_id              = var.subnet_id                 # Place in private subnet
-  vpc_security_group_ids = [aws_security_group.ad_sg.id] # Open required AD/DC ports per your SG
-
-  associate_public_ip_address = false # Private-only; reach it via SSM/bastion/VPN
-
-  iam_instance_profile = aws_iam_instance_profile.ec2_ssm_profile.name
-
-  user_data = templatefile("${path.module}/scripts/mini-ad.sh.template", {
-    HOSTNAME_DC        = "ad1"
-    DNS_ZONE           = var.dns_zone
-    REALM              = var.realm
-    NETBIOS            = var.netbios
-    ADMINISTRATOR_PASS = var.ad_admin_password
-    ADMIN_USER_PASS    = var.ad_admin_password
-    USERS_JSON         = local.effective_users_json
-  })
-
-  tags = {
-    Name = "mini-ad-dc-${lower(var.netbios)}"
+  # Core UDP ports for AD services
+  allow {
+    protocol = "udp"
+    ports    = ["53", "88", "389", "464", "123"] # NTP (123) is critical for Kerberos
   }
-}
 
-# ==================================================================================================
-# DHCP options for the VPC to direct instances to this DC for DNS
-# - domain_name: sets the search suffix (your AD DNS zone)
-# - domain_name_servers: points DHCP clients at the DC’s private IP for lookups
-# ==================================================================================================
-resource "aws_vpc_dhcp_options" "mini_ad_dns" {
-  domain_name         = var.dns_zone
-  domain_name_servers = [aws_instance.mini_ad_dc_instance.private_ip]
-
-  tags = {
-    Name = "mini-ad-dns"
+  # High dynamic port range for RPC
+  allow {
+    protocol = "tcp"
+    ports    = ["49152-65535"]
   }
+
+  # Scope: currently world-open; restrict in production environments
+  source_ranges = ["0.0.0.0/0"]
+
+  # Apply rule only to AD DC instances (by tag)
+  target_tags = ["ad-dc"]
 }
 
-# ==================================================================================================
-# Delay to allow the DC to finish provisioning (Samba/DNS up) before associating DHCP options
-# Adjust duration to your bootstrap time; 180s is a conservative lab default
-# ==================================================================================================
+# ==========================================================================================
+# VIRTUAL MACHINE: Mini Active Directory Domain Controller
+# ==========================================================================================
+# Creates a lightweight Ubuntu VM configured as a Samba AD DC.
+#   - Machine sizing is controlled by var.machine_type (default: e2-small).
+#   - Bootstraps automatically using a startup script template.
+#   - Service account attached for optional GCP API interactions.
+# ==========================================================================================
+
+resource "google_compute_instance" "mini_ad_dc_instance" {
+  name         = "mini-ad-dc-${lower(var.netbios)}"
+  machine_type = var.machine_type
+  zone         = var.zone
+
+  # -----------------------------------------------------------------
+  # Boot disk
+  # Ubuntu 24.04 LTS is pulled dynamically from the GCP Ubuntu image family.
+  # -----------------------------------------------------------------
+  boot_disk {
+    initialize_params {
+      image = data.google_compute_image.ubuntu_latest.self_link
+    }
+  }
+
+  # -----------------------------------------------------------------
+  # Network configuration
+  # Attaches the instance to the specified VPC and subnet.
+  # -----------------------------------------------------------------
+  network_interface {
+    network    = var.network
+    subnetwork = var.subnetwork
+  }
+
+  # -----------------------------------------------------------------
+  # Metadata injection
+  # Passes variables into a startup script that provisions Samba AD DC.
+  # Includes domain identity values and seeded user definitions.
+  # -----------------------------------------------------------------
+  metadata = {
+    enable-oslogin = "TRUE" # Enforce GCP OS Login for SSH access.
+
+    startup-script = templatefile("${path.module}/scripts/mini-ad.sh.template", {
+      HOSTNAME_DC        = "ad1"
+      DNS_ZONE           = var.dns_zone
+      REALM              = var.realm
+      NETBIOS            = var.netbios
+      ADMINISTRATOR_PASS = var.ad_admin_password
+      ADMIN_USER_PASS    = var.ad_admin_password
+      USERS_JSON         = local.effective_users_json
+    })
+  }
+
+  # -----------------------------------------------------------------
+  # Service account
+  # Grants VM permissions to interact with GCP APIs.
+  # Typically limited scope; here granted full cloud-platform for lab/demo simplicity.
+  # -----------------------------------------------------------------
+  service_account {
+    email  = var.email
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+
+  # -----------------------------------------------------------------
+  # Firewall tags
+  # Ensures the AD DC firewall rule applies to this VM.
+  # -----------------------------------------------------------------
+  tags = ["ad-dc"]
+}
+
+# ==========================================================================================
+# DATA SOURCE: Ubuntu Image
+# ==========================================================================================
+# Always pulls the latest Ubuntu 24.04 LTS image from GCP’s official Ubuntu image project.
+# Using a family reference avoids stale image references over time.
+# ==========================================================================================
+
+data "google_compute_image" "ubuntu_latest" {
+  family  = "ubuntu-2404-lts-amd64"
+  project = "ubuntu-os-cloud"
+}
+
+# ==========================================================================================
+# PROVISIONING DELAY: Wait for Samba bootstrap
+# ==========================================================================================
+# Gives the startup script time to configure Samba AD DC before DNS forwarding zone creation.
+# Default delay is 180s (tune based on observed bootstrap time).
+# ==========================================================================================
+
 resource "time_sleep" "wait_for_mini_ad" {
-  depends_on      = [aws_instance.mini_ad_dc_instance]
+  depends_on      = [google_compute_instance.mini_ad_dc_instance]
   create_duration = "180s"
 }
 
-# ==================================================================================================
-# Associate the custom DHCP options with the VPC once the DC is up
-# This causes new DHCP leases to prefer the DC for DNS resolution within the VPC
-# ==================================================================================================
-resource "aws_vpc_dhcp_options_association" "mini_ad_dns_assoc" {
-  vpc_id          = var.vpc_id
-  dhcp_options_id = aws_vpc_dhcp_options.mini_ad_dns.id
-  depends_on      = [time_sleep.wait_for_mini_ad]
+# ==========================================================================================
+# MANAGED PRIVATE DNS ZONE: AD Forward Zone
+# ==========================================================================================
+# Creates a private Cloud DNS zone forwarding to the Samba AD DC.
+# Ensures GCP resources in the VPC can resolve AD-integrated DNS queries.
+# ==========================================================================================
+
+resource "google_dns_managed_zone" "ad_forward_zone" {
+  name        = "${lower(var.netbios)}-forward-zone"
+  dns_name    = "${lower(var.dns_zone)}."
+  description = "Forward zone for ${var.netbios}."
+  visibility  = "private"
+
+  forwarding_config {
+    target_name_servers {
+      ipv4_address = google_compute_instance.mini_ad_dc_instance.network_interface[0].network_ip
+    }
+  }
+
+  private_visibility_config {
+    networks {
+      network_url = var.network
+    }
+  }
+
+  depends_on = [time_sleep.wait_for_mini_ad]
 }
 
-
 # ==========================================================================================
-# Local Variable: default_users_json
-# ------------------------------------------------------------------------------------------
-# - Renders a JSON file (`users.json.template`) into a single JSON blob
-# - Injects unique random passwords for test/demo users
-# - Template variables are replaced with real values at runtime
-# - Passed into the VM bootstrap so users are created automatically
+# LOCALS: User Definitions
+# ==========================================================================================
+# local.default_users_json
+#   - Renders the users.json.template with AD-specific values (DNs, realm, netbios).
+#   - Injects admin password for bootstrap user accounts.
+#
+# local.effective_users_json
+#   - Chooses between user-provided var.users_json or the generated default.
+#   - Ensures VM always has a valid JSON blob to seed AD users/groups.
 # ==========================================================================================
 
 locals {
   default_users_json = templatefile("${path.module}/scripts/users.json.template", {
-    USER_BASE_DN      = var.user_base_dn      # Base DN for placing new users in LDAP
-    DNS_ZONE          = var.dns_zone          # AD-integrated DNS zone
-    REALM             = var.realm             # Kerberos realm (FQDN in uppercase)
-    NETBIOS           = var.netbios           # NetBIOS domain name
-    sysadmin_password = var.ad_admin_password # Sysadmin password
+    USER_BASE_DN      = var.user_base_dn
+    DNS_ZONE          = var.dns_zone
+    REALM             = var.realm
+    NETBIOS           = var.netbios
+    sysadmin_password = var.ad_admin_password
   })
-}
 
-# -------------------------------------------------------------------
-# Local variable: effective_users_json
-# - Determines which users.json definition to use
-# - If the caller provides var.users_json → use that
-# - Otherwise, fall back to local.default_users_json
-# -------------------------------------------------------------------
-locals {
   effective_users_json = coalesce(var.users_json, local.default_users_json)
 }
