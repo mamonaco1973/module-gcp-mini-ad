@@ -1,0 +1,21 @@
+[Unit]
+Description=Mini-AD Max UID/GID JSON Service
+After=network.target
+
+[Service]
+# Run as root (needed for port 80)
+User=root
+Group=root
+
+# Path to Python and your script
+ExecStart=/module-aws-mini-ad/scripts/maxUidNumber.py
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5s
+
+# Working directory
+WorkingDirectory=/module-aws-mini-ad/scripts
+
+[Install]
+WantedBy=multi-user.target
