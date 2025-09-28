@@ -50,6 +50,7 @@ apt-get install -y --no-install-recommends \
   chrony \
   unzip \
   ldb-tools \
+  python3-flask  \
   jq  >> /root/userdata.log 2>&1
 
 #apt-get update >> /root/userdata.log 2>&1
