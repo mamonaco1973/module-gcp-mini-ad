@@ -156,6 +156,14 @@ nameserver 169.254.169.254
 EOF
 chattr +i /etc/resolv.conf || true
 
+# --------------------------------------------------------------------
+# ENABLE INSECURE LDAP SIMPLE BINDS
+# (Allows ldapsearch -x -H ldap://<dc>)
+  # --------------------------------------------------------------------
+
+sed -i '/^\s*ldap server require strong auth/d' /etc/samba/smb.conf
+sed -i '/^\[global\]/a ldap server require strong auth = no' /etc/samba/smb.conf
+
 #--------------------------------------------------------------------
 # Allow services to stabilize
 #--------------------------------------------------------------------
