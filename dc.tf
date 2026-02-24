@@ -1,4 +1,20 @@
 # ==========================================================================================
+# RANDOM IDENTIFIER: VM name suffix
+# ==========================================================================================
+# Generates a stable random suffix per state to avoid name collisions.
+# - byte_length=2 yields 4 hex chars (e.g., "a3f1").
+# ==========================================================================================
+
+resource "random_id" "vm_suffix" {
+  byte_length = 3
+}
+
+locals {
+  vm_suffix_hex = random_id.vm_suffix.hex
+}
+
+
+# ==========================================================================================
 # FIREWALL RULE: Active Directory Domain Controller Ports
 # ==========================================================================================
 # This firewall rule enables the network ports required by a Samba-based AD DC.
@@ -10,7 +26,7 @@
 # ==========================================================================================
 
 resource "google_compute_firewall" "ad_ports" {
-  name    = "ad-ports"
+  name    = "ad-ports-${local.vm_suffix_hex}"
   network = var.network
 
   # Core TCP ports for AD services
@@ -35,7 +51,7 @@ resource "google_compute_firewall" "ad_ports" {
   source_ranges = ["0.0.0.0/0"]
 
   # Apply rule only to AD DC instances (by tag)
-  target_tags = ["ad-dc"]
+  target_tags = ["ad-dc-${local.vm_suffix_hex}"]
 }
 
 # ==========================================================================================
@@ -48,7 +64,7 @@ resource "google_compute_firewall" "ad_ports" {
 # ==========================================================================================
 
 resource "google_compute_instance" "mini_ad_dc_instance" {
-  name         = "mini-ad-dc-${lower(var.netbios)}"
+  name         = "mini-ad-dc-${lower(var.netbios)}-${local.vm_suffix_hex}"
   machine_type = var.machine_type
   zone         = var.zone
 
@@ -104,7 +120,7 @@ resource "google_compute_instance" "mini_ad_dc_instance" {
   # Firewall tags
   # Ensures the AD DC firewall rule applies to this VM.
   # -----------------------------------------------------------------
-  tags = ["ad-dc"]
+  tags = ["ad-dc-${local.vm_suffix_hex}"]
 }
 
 # ==========================================================================================
