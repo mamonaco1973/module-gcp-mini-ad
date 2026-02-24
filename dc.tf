@@ -155,7 +155,7 @@ resource "time_sleep" "wait_for_mini_ad" {
 # ==========================================================================================
 
 resource "google_dns_managed_zone" "ad_forward_zone" {
-  name        = "${lower(var.netbios)}-forward-zone"
+  name        = "${lower(var.netbios)}-forward-zone-${local.vm_suffix_hex}"
   dns_name    = "${lower(var.dns_zone)}."
   description = "Forward zone for ${var.netbios}."
   visibility  = "private"
